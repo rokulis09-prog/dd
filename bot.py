@@ -1,15 +1,13 @@
 import discord
 import asyncio
-import os
 import random
-import json
-from discord.ext import commands, tasks
 import logging
+from discord.ext import commands
 
-# === CONFIGURATION ===
-TOKEN = "YOUR_BOT_TOKEN_HERE"  # Replace with your actual token
+# === KONFIGURACIJA ===
+TOKEN = "YOUR_TOKEN_HERE"  # Įvesk savo token
 
-# Your channels and messages from the JSON you sent
+# Tavo kanalai ir žinutės
 CHANNELS = [
     {"channel_id": "790439605655699456", "message": "Lonely :("},
     {"channel_id": "790439743397560361", "message": "Meowwww"},
@@ -33,71 +31,57 @@ CHANNELS = [
     {"channel_id": "931386111840907364", "message": "Meowwwwww"}
 ]
 
-# === BOT SETUP ===
-intents = discord.Intents.default()
-intents.message_content = True
-
-bot = commands.Bot(command_prefix='!', intents=intents)
-
-# Setup logging
+# === LOG NUSTATYMAI ===
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# === FUNCTIONS ===
+# === BOT SETUP - discrd.py-self ===
+intents = discord.Intents.all()  # Self-bot reikia visų intentų
+bot = commands.Bot(command_prefix='!', intents=intents, self_bot=True)  # self_bot=True svarbu!
+
+# === FUNKCIJOS ===
 
 async def send_to_channel(channel_id, message_text):
-    """Send a message to a specific channel with rate limit handling"""
-    channel = bot.get_channel(int(channel_id))
-    
-    if not channel:
-        logger.error(f"❌ Channel not found: {channel_id}")
-        return False
-    
+    """Siunčia žinutę į kanalą"""
     try:
+        channel = bot.get_channel(int(channel_id))
+        
+        if not channel:
+            # Bandome gauti kanalą per fetch
+            try:
+                channel = await bot.fetch_channel(int(channel_id))
+            except:
+                logger.error(f"❌ Nerastas kanalas: {channel_id}")
+                return False
+        
+        # Siunčiam žinutę
         await channel.send(message_text)
-        logger.info(f"✅ Sent to {channel_id}")
+        logger.info(f"✅ Išsiųsta į {channel_id}")
         return True
         
     except discord.Forbidden:
-        logger.error(f"❌ No permission to send in {channel_id}")
+        logger.error(f"❌ Nėra leidimo siųsti į {channel_id}")
         return False
-        
     except discord.NotFound:
-        logger.error(f"❌ Channel not found (404): {channel_id}")
+        logger.error(f"❌ Kanalas neegzistuoja: {channel_id}")
         return False
-        
     except discord.HTTPException as e:
-        if e.status == 429:  # Rate limited
+        if e.status == 429:  # Rate limit
             retry_after = e.retry_after
-            logger.warning(f"⚠️ Rate limited on {channel_id}. Retry after {retry_after:.2f}s")
-            
-            if retry_after > 300:  # If more than 5 minutes, skip
-                logger.warning(f"⏭️ Skipping {channel_id} (retry too long: {retry_after:.2f}s)")
-                return False
-            else:
-                logger.info(f"💤 Waiting {retry_after + 2}s...")
-                await asyncio.sleep(retry_after + 2)
-                # Try one more time
-                try:
-                    await channel.send(message_text)
-                    logger.info(f"✅ Sent to {channel_id} on retry")
-                    return True
-                except:
-                    logger.error(f"❌ Failed again for {channel_id}")
-                    return False
+            logger.warning(f"⚠️ Rate limit {channel_id}. Laukiu {retry_after}s")
+            await asyncio.sleep(retry_after + 2)
         else:
-            logger.error(f"❌ HTTP error for {channel_id}: {e}")
-            return False
-            
+            logger.error(f"❌ Klaida {channel_id}: {e}")
+        return False
     except Exception as e:
-        logger.error(f"❌ Unexpected error for {channel_id}: {e}")
+        logger.error(f"❌ Netikėta klaida {channel_id}: {e}")
         return False
 
 async def send_all_messages():
-    """Send messages to all channels with proper delays between them"""
-    logger.info("📨 Starting to send messages to all channels")
+    """Siunčia žinutes į visus kanalus"""
+    logger.info("📨 Pradedu siųsti žinutes")
     
-    # Shuffle channels to avoid always sending in same order
+    # Sumaišom kanalus
     channels_copy = CHANNELS.copy()
     random.shuffle(channels_copy)
     
@@ -108,73 +92,59 @@ async def send_all_messages():
         channel_id = channel_data["channel_id"]
         message_text = channel_data["message"]
         
-        logger.info(f"📤 [{i+1}/{len(channels_copy)}] Sending to {channel_id}")
+        logger.info(f"📤 [{i+1}/{len(channels_copy)}] Siunčiu į {channel_id}")
         
-        # Send the message
         if await send_to_channel(channel_id, message_text):
             successful += 1
         else:
             failed += 1
         
-        # Wait before next channel (except for the last one)
+        # Laukiam prieš kitą kanalą
         if i < len(channels_copy) - 1:
-            # Random wait between 4-8 minutes (240-480 seconds)
-            # This helps avoid rate limiting patterns
-            wait_time = random.randint(280, 520)
-            logger.info(f"⏱️ Waiting {wait_time}s before next channel...")
+            wait_time = random.randint(240, 480)  # 4-8 min
+            logger.info(f"⏱️ Laukiu {wait_time}s prieš kitą kanalą...")
             
-            # Break the wait into smaller chunks so we can check for bot shutdown
+            # Laukim mažais gabaliukais
             for _ in range(wait_time // 10):
                 await asyncio.sleep(10)
     
-    logger.info(f"📊 Complete: {successful} successful, {failed} failed")
+    logger.info(f"📊 Rezultatai: {successful} sėkmingi, {failed} nepavyko")
     return successful, failed
 
 # === TASKS ===
 
 @tasks.loop(hours=2)
 async def scheduled_messages():
-    """Run every 2 hours"""
-    logger.info("🕐 Starting scheduled message cycle")
+    """Kas 2 valandas"""
+    logger.info("🕐 Pradedu ciklą")
     await send_all_messages()
-    logger.info("✅ Cycle complete, next run in 2 hours")
-
-@tasks.loop(minutes=30)
-async def health_check():
-    """Simple health check every 30 minutes"""
-    logger.info("💓 Bot is running...")
+    logger.info("✅ Ciklas baigtas")
 
 # === EVENTS ===
 
 @bot.event
 async def on_ready():
-    logger.info(f"✅ Bot logged in as {bot.user.name}")
-    logger.info(f"📊 Monitoring {len(CHANNELS)} channels")
-    logger.info(f"⏰ Interval: 2.0 hours")
+    logger.info(f"✅ Bot prisijungė kaip {bot.user.name}")
+    logger.info(f"📊 Stebiu {len(CHANNELS)} kanalų")
+    logger.info(f"⏰ Intervalas: 2 valandos")
     
-    # Start the scheduled messages if not already running
+    # Paleidžiam scheduler
     if not scheduled_messages.is_running():
         scheduled_messages.start()
-        logger.info("✅ Scheduled messages started")
-    
-    if not health_check.is_running():
-        health_check.start()
+        logger.info("✅ Scheduler paleistas")
 
 @bot.event
 async def on_message(message):
-    # Don't respond to ourselves
-    if message.author == bot.user:
-        return
-    
-    # Simple commands
+    # Atsako tik į komandas
     if message.content.startswith('!status'):
-        await message.channel.send(f"✅ Bot is running!\n📊 Channels: {len(CHANNELS)}\n⏰ Interval: 2 hours")
+        await message.channel.send(f"✅ Bot veikia!\n📊 Kanalų: {len(CHANNELS)}\n⏰ Intervalas: 2 val.")
     
     if message.content.startswith('!sendnow'):
-        await message.channel.send("🔄 Manually starting message cycle...")
+        await message.channel.send("🔄 Pradedu rankinį siuntimą...")
         await send_all_messages()
-        await message.channel.send("✅ Manual cycle complete!")
+        await message.channel.send("✅ Baigta!")
     
+    # Important for self-bots: process commands
     await bot.process_commands(message)
 
 # === MAIN ===
@@ -187,6 +157,6 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("👋 Bot stopped by user")
+        logger.info("👋 Bot sustabdytas")
     except Exception as e:
-        logger.error(f"💥 Fatal error: {e}")
+        logger.error(f"💥 Klaida: {e}")
