@@ -1,125 +1,192 @@
-# bot.py - Improved version with environment variable support
 import discord
 import asyncio
-import json
 import os
 import random
-from datetime import datetime, timedelta
+import json
+from discord.ext import commands, tasks
 import logging
 
-# Set up logging
+# === CONFIGURATION ===
+TOKEN = "YOUR_BOT_TOKEN_HERE"  # Replace with your actual token
+
+# Your channels and messages from the JSON you sent
+CHANNELS = [
+    {"channel_id": "790439605655699456", "message": "Lonely :("},
+    {"channel_id": "790439743397560361", "message": "Meowwww"},
+    {"channel_id": "790440385289388083", "message": "Haiiii"},
+    {"channel_id": "862668376106205224", "message": "୨୧┇Name: Emilly ୨୧┇Gender: Female ୨୧┇Pronounce: She/her ୨୧┇Age:19 ୨୧┇Location: Europe ୨୧┇Sexuality: straight ୨୧┇Dms:open Only 18 and + ୨୧┇Interest: Gymmmm, watching anime in free time thats it :heart: ୨୧┇+my dog too"},
+    {"channel_id": "990736816632102922", "message": "Dms opennnnn"},
+    {"channel_id": "1431019158849720502", "message": "Dm LOOSERSSSS"},
+    {"channel_id": "1431014605093732474", "message": "Dms opennn for now <3"},
+    {"channel_id": "1411679869225406566", "message": "so hornyyyyyyyyyyyyy"},
+    {"channel_id": "731254148678549595", "message": "Haiiiii againn"},
+    {"channel_id": "701906138563870840", "message": "Meowwww..."},
+    {"channel_id": "1457746011597439018", "message": "GRRRRRRRRRRR angryy"},
+    {"channel_id": "1396545118684712990", "message": "୨୧┇Name: Emilly ୨୧┇Gender: Female ୨୧┇Pronounce: She/her ୨୧┇Age:19 ୨୧┇Location: Europe ୨୧┇Sexuality: straight ୨୧┇Dms:open Only 18 and + ୨୧┇Interest: Gymmmm, watching anime in free time thats it :heart: ୨୧┇+my dog too"},
+    {"channel_id": "1455617646195114065", "message": "Dms opennnn :heart: for nowwwww"},
+    {"channel_id": "1455996727390900297", "message": "୨୧┇Name: Emilly ୨୧┇Gender: Female ୨୧┇Pronounce: She/her ୨୧┇Age:19"},
+    {"channel_id": "1271825597555019847", "message": "୨୧┇Name: Emilly ୨୧┇Gender: Female ୨୧┇Pronounce: She/her ୨୧┇Age:19 ୨୧┇Location: Europe ୨୧┇Sexuality: straight ୨୧┇Dms:open Only 18 and + ୨୧┇Interest: Gymmmm, watching anime in free time thats it :heart: ୨୧┇+my dog too"},
+    {"channel_id": "1437599197577613312", "message": "୨୧┇Name: Emilly ୨୧┇Gender: Female ୨୧┇Pronounce: She/her ୨୧┇Age:19 ୨୧┇Location: Europe ୨୧┇Sexuality: straight ୨୧┇Dms:open Only 18 and + ୨୧┇Interest: Gymmmm, watching anime in free time thats it :heart: ୨୧┇+my dog too"},
+    {"channel_id": "1471183318866198608", "message": "Im angry"},
+    {"channel_id": "1463239385712558367", "message": "Dms opennn "},
+    {"channel_id": "1457727461793206305", "message": "୨୧┇Name: Emilly ୨୧┇Gender: Female ୨୧┇Pronounce: She/her ୨୧┇Age:19 ୨୧┇Location: Europe ୨୧┇Sexuality: straight ୨୧┇Dms:open Only 18 and + ୨୧┇Interest: Gymmmm, watching anime in free time thats it :heart: ୨୧┇+my dog too"},
+    {"channel_id": "931386111840907364", "message": "Meowwwwww"}
+]
+
+# === BOT SETUP ===
+intents = discord.Intents.default()
+intents.message_content = True
+
+bot = commands.Bot(command_prefix='!', intents=intents)
+
+# Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class RailwayBot(discord.Client):
-    def __init__(self):
-        super().__init__()
-        self.token = os.environ.get('DISCORD_TOKEN')
-        self.load_config()
-        self.running = True
-        
-    def load_config(self):
-        """Load configuration from environment variables"""
-        # Get interval settings
-        self.interval_hours = float(os.environ.get('INTERVAL_HOURS', '2'))
-        self.min_delay = int(os.environ.get('MIN_DELAY', '60'))
-        self.max_delay = int(os.environ.get('MAX_DELAY', '300'))
-        
-        # Get channels from JSON environment variable
-        channels_json = os.environ.get('CHANNELS', '[]')
-        try:
-            self.channels = json.loads(channels_json)
-            logger.info(f"✅ Loaded {len(self.channels)} channels from environment")
-        except json.JSONDecodeError as e:
-            logger.error(f"❌ Failed to parse CHANNELS JSON: {e}")
-            self.channels = []
-        
-        # Track last sent times (in memory only)
-        self.last_sent = {}
-    
-    async def on_ready(self):
-        logger.info(f"✅ Bot logged in as {self.user}")
-        logger.info(f"📊 Monitoring {len(self.channels)} channels")
-        logger.info(f"⏰ Interval: {self.interval_hours} hours")
-        
-        if len(self.channels) == 0:
-            logger.warning("⚠️ No channels configured! Add CHANNELS environment variable.")
-        
-        # Start the sending loop
-        self.loop.create_task(self.send_loop())
-    
-    async def send_loop(self):
-        """Main sending loop"""
-        while True:
-            try:
-                now = datetime.now()
-                channels_to_send = []
-                
-                # Check which channels need sending
-                for channel_config in self.channels:
-                    channel_id = channel_config["channel_id"]
-                    
-                    # Check if we should send
-                    should_send = True
-                    if channel_id in self.last_sent:
-                        last = self.last_sent[channel_id]
-                        hours_since = (now - last).total_seconds() / 3600
-                        if hours_since < self.interval_hours:
-                            should_send = False
-                    
-                    if should_send:
-                        channels_to_send.append(channel_config)
-                
-                if channels_to_send:
-                    logger.info(f"📨 Sending to {len(channels_to_send)} channels")
-                    
-                    # Randomize order
-                    random.shuffle(channels_to_send)
-                    
-                    for i, channel_config in enumerate(channels_to_send, 1):
-                        channel_id = channel_config["channel_id"]
-                        message = channel_config["message"]
-                        
-                        # Random delay between channels
-                        delay = random.randint(self.min_delay, self.max_delay)
-                        logger.info(f"⏱️ Waiting {delay}s before next channel...")
-                        await asyncio.sleep(delay)
-                        
-                        try:
-                            channel = self.get_channel(int(channel_id))
-                            if channel:
-                                await channel.send(message)
-                                logger.info(f"✅ Sent to {channel_id[:8]}...: {message[:30]}...")
-                                self.last_sent[channel_id] = now
-                            else:
-                                logger.error(f"❌ Channel not found: {channel_id[:8]}...")
-                        except Exception as e:
-                            logger.error(f"❌ Error sending to {channel_id[:8]}...: {e}")
-                
-                # Calculate next run
-                next_run = now + timedelta(hours=self.interval_hours)
-                logger.info(f"🕒 Next batch at: {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
-                logger.info(f"💤 Sleeping for {self.interval_hours} hours...")
-                
-                await asyncio.sleep(self.interval_hours * 3600)
-                
-            except Exception as e:
-                logger.error(f"❌ Error in send loop: {e}")
-                await asyncio.sleep(60)  # Wait a minute before retrying
-    
-    async def on_error(self, event, *args, **kwargs):
-        logger.error(f"❌ Error in {event}: {args} {kwargs}")
+# === FUNCTIONS ===
 
-def main():
-    # Get token from environment variable
-    token = os.environ.get('DISCORD_TOKEN')
-    if not token:
-        logger.error("❌ DISCORD_TOKEN environment variable not set!")
+async def send_to_channel(channel_id, message_text):
+    """Send a message to a specific channel with rate limit handling"""
+    channel = bot.get_channel(int(channel_id))
+    
+    if not channel:
+        logger.error(f"❌ Channel not found: {channel_id}")
+        return False
+    
+    try:
+        await channel.send(message_text)
+        logger.info(f"✅ Sent to {channel_id}")
+        return True
+        
+    except discord.Forbidden:
+        logger.error(f"❌ No permission to send in {channel_id}")
+        return False
+        
+    except discord.NotFound:
+        logger.error(f"❌ Channel not found (404): {channel_id}")
+        return False
+        
+    except discord.HTTPException as e:
+        if e.status == 429:  # Rate limited
+            retry_after = e.retry_after
+            logger.warning(f"⚠️ Rate limited on {channel_id}. Retry after {retry_after:.2f}s")
+            
+            if retry_after > 300:  # If more than 5 minutes, skip
+                logger.warning(f"⏭️ Skipping {channel_id} (retry too long: {retry_after:.2f}s)")
+                return False
+            else:
+                logger.info(f"💤 Waiting {retry_after + 2}s...")
+                await asyncio.sleep(retry_after + 2)
+                # Try one more time
+                try:
+                    await channel.send(message_text)
+                    logger.info(f"✅ Sent to {channel_id} on retry")
+                    return True
+                except:
+                    logger.error(f"❌ Failed again for {channel_id}")
+                    return False
+        else:
+            logger.error(f"❌ HTTP error for {channel_id}: {e}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"❌ Unexpected error for {channel_id}: {e}")
+        return False
+
+async def send_all_messages():
+    """Send messages to all channels with proper delays between them"""
+    logger.info("📨 Starting to send messages to all channels")
+    
+    # Shuffle channels to avoid always sending in same order
+    channels_copy = CHANNELS.copy()
+    random.shuffle(channels_copy)
+    
+    successful = 0
+    failed = 0
+    
+    for i, channel_data in enumerate(channels_copy):
+        channel_id = channel_data["channel_id"]
+        message_text = channel_data["message"]
+        
+        logger.info(f"📤 [{i+1}/{len(channels_copy)}] Sending to {channel_id}")
+        
+        # Send the message
+        if await send_to_channel(channel_id, message_text):
+            successful += 1
+        else:
+            failed += 1
+        
+        # Wait before next channel (except for the last one)
+        if i < len(channels_copy) - 1:
+            # Random wait between 4-8 minutes (240-480 seconds)
+            # This helps avoid rate limiting patterns
+            wait_time = random.randint(280, 520)
+            logger.info(f"⏱️ Waiting {wait_time}s before next channel...")
+            
+            # Break the wait into smaller chunks so we can check for bot shutdown
+            for _ in range(wait_time // 10):
+                await asyncio.sleep(10)
+    
+    logger.info(f"📊 Complete: {successful} successful, {failed} failed")
+    return successful, failed
+
+# === TASKS ===
+
+@tasks.loop(hours=2)
+async def scheduled_messages():
+    """Run every 2 hours"""
+    logger.info("🕐 Starting scheduled message cycle")
+    await send_all_messages()
+    logger.info("✅ Cycle complete, next run in 2 hours")
+
+@tasks.loop(minutes=30)
+async def health_check():
+    """Simple health check every 30 minutes"""
+    logger.info("💓 Bot is running...")
+
+# === EVENTS ===
+
+@bot.event
+async def on_ready():
+    logger.info(f"✅ Bot logged in as {bot.user.name}")
+    logger.info(f"📊 Monitoring {len(CHANNELS)} channels")
+    logger.info(f"⏰ Interval: 2.0 hours")
+    
+    # Start the scheduled messages if not already running
+    if not scheduled_messages.is_running():
+        scheduled_messages.start()
+        logger.info("✅ Scheduled messages started")
+    
+    if not health_check.is_running():
+        health_check.start()
+
+@bot.event
+async def on_message(message):
+    # Don't respond to ourselves
+    if message.author == bot.user:
         return
     
-    # Create and run bot
-    bot = RailwayBot()
-    bot.run(token)
+    # Simple commands
+    if message.content.startswith('!status'):
+        await message.channel.send(f"✅ Bot is running!\n📊 Channels: {len(CHANNELS)}\n⏰ Interval: 2 hours")
+    
+    if message.content.startswith('!sendnow'):
+        await message.channel.send("🔄 Manually starting message cycle...")
+        await send_all_messages()
+        await message.channel.send("✅ Manual cycle complete!")
+    
+    await bot.process_commands(message)
+
+# === MAIN ===
+
+async def main():
+    async with bot:
+        await bot.start(TOKEN)
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("👋 Bot stopped by user")
+    except Exception as e:
+        logger.error(f"💥 Fatal error: {e}")
