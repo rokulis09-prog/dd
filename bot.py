@@ -1,10 +1,10 @@
-# bot.py - Improved version with environment variable support
 import discord
-import asyncio
-import json
 import os
 import random
+import json
 from datetime import datetime, timedelta
+import asyncio
+from pathlib import Path
 import logging
 
 # Set up logging
@@ -15,17 +15,37 @@ class RailwayBot(discord.Client):
     def __init__(self):
         super().__init__()
         self.token = os.environ.get('DISCORD_TOKEN')
+        self.images_path = "/app/images"  # Your volume mount path
+        self.available_images = self.scan_images()
         self.load_config()
+        self.last_sent = {}
         self.running = True
         
+    def scan_images(self):
+        """Scan the images folder and return list of available images"""
+        image_dir = Path(self.images_path)
+        if not image_dir.exists():
+            logger.warning(f"⚠️ Image directory {self.images_path} not found!")
+            return []
+        
+        # Get all image files
+        extensions = ['*.jpg', '*.jpeg', '*.png', '*.gif', '*.webp']
+        images = []
+        for ext in extensions:
+            images.extend(image_dir.glob(ext))
+            # Also check subfolders
+            images.extend(image_dir.rglob(ext))
+        
+        logger.info(f"✅ Found {len(images)} images in volume")
+        return [str(img) for img in images]
+    
     def load_config(self):
         """Load configuration from environment variables"""
-        # Get interval settings
         self.interval_hours = float(os.environ.get('INTERVAL_HOURS', '2'))
         self.min_delay = int(os.environ.get('MIN_DELAY', '60'))
         self.max_delay = int(os.environ.get('MAX_DELAY', '300'))
         
-        # Get channels from JSON environment variable
+        # Get channels from JSON
         channels_json = os.environ.get('CHANNELS', '[]')
         try:
             self.channels = json.loads(channels_json)
@@ -33,24 +53,60 @@ class RailwayBot(discord.Client):
         except json.JSONDecodeError as e:
             logger.error(f"❌ Failed to parse CHANNELS JSON: {e}")
             self.channels = []
-        
-        # Track last sent times (in memory only)
-        self.last_sent = {}
+    
+    async def send_image_to_channel(self, channel_id, specific_image=None):
+        """Send an image to a specific channel"""
+        try:
+            channel = self.get_channel(int(channel_id))
+            if not channel:
+                logger.error(f"❌ Channel not found: {channel_id[:8]}...")
+                return False
+            
+            if not self.available_images:
+                logger.error("❌ No images found in volume!")
+                return False
+            
+            # Choose image
+            image_path = None
+            if specific_image:
+                # Look for specific image
+                for img in self.available_images:
+                    if specific_image in img or img.endswith(specific_image):
+                        image_path = img
+                        break
+                
+                if not image_path:
+                    logger.error(f"❌ Image '{specific_image}' not found")
+                    return False
+            else:
+                # Pick random image
+                image_path = random.choice(self.available_images)
+            
+            # Send the image
+            filename = os.path.basename(image_path)
+            with open(image_path, 'rb') as f:
+                await channel.send(file=discord.File(f, filename=filename))
+            
+            logger.info(f"✅ Image sent to {channel_id[:8]}... ({filename})")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error sending image: {e}")
+            return False
     
     async def on_ready(self):
         logger.info(f"✅ Bot logged in as {self.user}")
         logger.info(f"📊 Monitoring {len(self.channels)} channels")
+        logger.info(f"🖼️ {len(self.available_images)} images available")
         logger.info(f"⏰ Interval: {self.interval_hours} hours")
+        logger.info(f"⏱️ Delays: {self.min_delay}-{self.max_delay} seconds")
         
-        if len(self.channels) == 0:
-            logger.warning("⚠️ No channels configured! Add CHANNELS environment variable.")
-        
-        # Start the sending loop
+        # Start sending loop
         self.loop.create_task(self.send_loop())
     
     async def send_loop(self):
-        """Main sending loop"""
-        while True:
+        """Main sending loop with image support"""
+        while self.running:
             try:
                 now = datetime.now()
                 channels_to_send = []
@@ -59,7 +115,6 @@ class RailwayBot(discord.Client):
                 for channel_config in self.channels:
                     channel_id = channel_config["channel_id"]
                     
-                    # Check if we should send
                     should_send = True
                     if channel_id in self.last_sent:
                         last = self.last_sent[channel_id]
@@ -72,54 +127,69 @@ class RailwayBot(discord.Client):
                 
                 if channels_to_send:
                     logger.info(f"📨 Sending to {len(channels_to_send)} channels")
-                    
-                    # Randomize order
                     random.shuffle(channels_to_send)
                     
-                    for i, channel_config in enumerate(channels_to_send, 1):
+                    for channel_config in channels_to_send:
                         channel_id = channel_config["channel_id"]
-                        message = channel_config["message"]
                         
-                        # Random delay between channels
+                        # Random delay
                         delay = random.randint(self.min_delay, self.max_delay)
                         logger.info(f"⏱️ Waiting {delay}s before next channel...")
                         await asyncio.sleep(delay)
                         
                         try:
                             channel = self.get_channel(int(channel_id))
-                            if channel:
-                                await channel.send(message)
-                                logger.info(f"✅ Sent to {channel_id[:8]}...: {message[:30]}...")
-                                self.last_sent[channel_id] = now
-                            else:
+                            if not channel:
                                 logger.error(f"❌ Channel not found: {channel_id[:8]}...")
+                                continue
+                            
+                            # Determine message type
+                            msg_type = channel_config.get("type", "text")
+                            
+                            if msg_type == "text":
+                                # Just text
+                                await channel.send(channel_config["message"])
+                                logger.info(f"✅ Text sent to {channel_id[:8]}...")
+                                
+                            elif msg_type == "image":
+                                # Just image
+                                image_name = channel_config.get("image", None)
+                                await self.send_image_to_channel(channel_id, image_name)
+                                
+                            elif msg_type == "mixed":
+                                # Text + image
+                                await channel.send(channel_config["message"])
+                                await self.send_image_to_channel(channel_id)
+                            
+                            # Update last sent time
+                            self.last_sent[channel_id] = now
+                            
                         except Exception as e:
                             logger.error(f"❌ Error sending to {channel_id[:8]}...: {e}")
                 
-                # Calculate next run
+                # Next run
                 next_run = now + timedelta(hours=self.interval_hours)
                 logger.info(f"🕒 Next batch at: {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
                 logger.info(f"💤 Sleeping for {self.interval_hours} hours...")
-                
                 await asyncio.sleep(self.interval_hours * 3600)
                 
             except Exception as e:
                 logger.error(f"❌ Error in send loop: {e}")
-                await asyncio.sleep(60)  # Wait a minute before retrying
+                await asyncio.sleep(60)
     
-    async def on_error(self, event, *args, **kwargs):
-        logger.error(f"❌ Error in {event}: {args} {kwargs}")
+    def stop(self):
+        self.running = False
+        self.loop.call_soon_threadsafe(self.loop.stop)
+    
+    def run_bot(self):
+        try:
+            self.run(self.token)
+        except Exception as e:
+            logger.error(f"❌ Bot error: {e}")
 
 def main():
-    # Get token from environment variable
-    token = os.environ.get('DISCORD_TOKEN')
-    if not token:
-        logger.error("❌ DISCORD_TOKEN environment variable not set!")
-        return
-    
-    # Create and run bot
     bot = RailwayBot()
-    bot.run(token)
+    bot.run_bot()
 
 if __name__ == "__main__":
     main()
