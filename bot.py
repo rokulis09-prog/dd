@@ -98,7 +98,7 @@ class RailwayBot(discord.Client):
         self.loop.create_task(self.send_loop())
     
     async def send_loop(self):
-        """Main sending loop - FIXED: NO WAITING ON RATE LIMITS"""
+        """FINAL FIXED VERSION - NO WAITING ON RATE LIMITS"""
         while self.running:
             try:
                 now = datetime.now()
@@ -139,6 +139,7 @@ class RailwayBot(discord.Client):
                             
                             msg_type = channel_config.get("type", "text")
                             
+                            # ACTUALLY SEND THE MESSAGE HERE
                             if msg_type == "text":
                                 await channel.send(channel_config["message"])
                                 logger.info(f"✅ Text sent to {channel_id[:8]}...")
@@ -158,9 +159,10 @@ class RailwayBot(discord.Client):
                             self.last_sent[channel_id] = now
                             
                         except discord.HTTPException as e:
+                            # THIS IS THE KEY FIX - NO WAITING ON 429
                             if e.code == 429:  # Rate limited
-                                logger.warning(f"⚠️ Rate limited on {channel_id[:8]}... - SKIPPING (no wait)")
-                                # DON'T WAIT - just skip and mark as sent
+                                logger.warning(f"⚠️ Rate limited on {channel_id[:8]}... - SKIPPING (NO WAIT)")
+                                # IMMEDIATELY SKIP - DON'T WAIT
                                 self.last_sent[channel_id] = now
                             elif e.code == 200000:  # Content blocked
                                 logger.warning(f"⚠️ Content blocked in {channel_id[:8]}... - skipping")
