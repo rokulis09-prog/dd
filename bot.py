@@ -8,13 +8,18 @@ from pathlib import Path
 import logging
 import traceback
 
+# Disable discord.py's automatic retry on rate limits
+import discord.http
+discord.http.Retry.max = 0  # This disables automatic retries!
+
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class RailwayBot(discord.Client):
     def __init__(self):
-        super().__init__()
+        # Disable rate limit retries in the client too
+        super().__init__(max_ratelimit_retries=0)
         self.token = os.environ.get('DISCORD_TOKEN')
         self.images_path = "/app/images"
         self.available_images = self.scan_images()
@@ -84,6 +89,13 @@ class RailwayBot(discord.Client):
             logger.info(f"✅ Image sent to {channel_id[:8]}... ({filename})")
             return True
             
+        except discord.HTTPException as e:
+            if e.code == 429:  # Rate limited
+                logger.warning(f"⚠️ Rate limited on image for {channel_id[:8]}... - skipping")
+                return False
+            else:
+                logger.error(f"❌ Discord error sending image: {e.code}")
+                return False
         except Exception as e:
             logger.error(f"❌ Error sending image: {e}")
             return False
@@ -98,7 +110,7 @@ class RailwayBot(discord.Client):
         self.loop.create_task(self.send_loop())
     
     async def send_loop(self):
-        """FINAL FIXED VERSION - NO WAITING ON RATE LIMITS"""
+        """FINAL FIX - With discord.py retries disabled"""
         while self.running:
             try:
                 now = datetime.now()
@@ -139,40 +151,39 @@ class RailwayBot(discord.Client):
                             
                             msg_type = channel_config.get("type", "text")
                             
-                            # ACTUALLY SEND THE MESSAGE HERE
-                            if msg_type == "text":
-                                await channel.send(channel_config["message"])
-                                logger.info(f"✅ Text sent to {channel_id[:8]}...")
+                            try:
+                                if msg_type == "text":
+                                    await channel.send(channel_config["message"])
+                                    logger.info(f"✅ Text sent to {channel_id[:8]}...")
+                                    
+                                elif msg_type == "image":
+                                    image_name = channel_config.get("image", None)
+                                    await self.send_image_to_channel(channel_id, image_name)
+                                    
+                                elif msg_type == "mixed":
+                                    await channel.send(channel_config["message"])
+                                    await self.send_image_to_channel(channel_id)
                                 
-                            elif msg_type == "image":
-                                image_name = channel_config.get("image", None)
-                                await self.send_image_to_channel(channel_id, image_name)
+                                self.last_sent[channel_id] = now
                                 
-                            elif msg_type == "mixed":
-                                await channel.send(channel_config["message"])
-                                await self.send_image_to_channel(channel_id)
-                            
-                            self.last_sent[channel_id] = now
-                            
-                        except discord.Forbidden:
-                            logger.error(f"❌ Missing permissions in {channel_id[:8]}... - skipping")
-                            self.last_sent[channel_id] = now
-                            
-                        except discord.HTTPException as e:
-                            # THIS IS THE KEY FIX - NO WAITING ON 429
-                            if e.code == 429:  # Rate limited
-                                logger.warning(f"⚠️ Rate limited on {channel_id[:8]}... - SKIPPING (NO WAIT)")
-                                # IMMEDIATELY SKIP - DON'T WAIT
+                            except discord.HTTPException as e:
+                                if e.code == 429:  # Rate limited
+                                    logger.warning(f"⚠️ Rate limited on {channel_id[:8]}... - SKIPPED (no wait)")
+                                else:
+                                    logger.error(f"❌ Discord error {e.code} in {channel_id[:8]}... - skipping")
+                                # Mark as sent to avoid retry loop
                                 self.last_sent[channel_id] = now
-                            elif e.code == 200000:  # Content blocked
-                                logger.warning(f"⚠️ Content blocked in {channel_id[:8]}... - skipping")
+                                
+                            except discord.Forbidden:
+                                logger.error(f"❌ Missing permissions in {channel_id[:8]}... - skipping")
                                 self.last_sent[channel_id] = now
-                            else:
-                                logger.error(f"❌ Discord error {e.code} in {channel_id[:8]}... - skipping")
+                                
+                            except Exception as e:
+                                logger.error(f"❌ Unexpected error in {channel_id[:8]}...: {e} - skipping")
                                 self.last_sent[channel_id] = now
                             
                         except Exception as e:
-                            logger.error(f"❌ Unexpected error in {channel_id[:8]}...: {e} - skipping")
+                            logger.error(f"❌ Channel error: {e}")
                             self.last_sent[channel_id] = now
                 
                 # Next run
