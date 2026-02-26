@@ -8,24 +8,35 @@ from pathlib import Path
 import logging
 import traceback
 
-# Disable discord.py's automatic retry on rate limits
-import discord.http
-discord.http.Retry.max = 0  # This disables automatic retries!
-
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Custom HTTP handler that doesn't retry on rate limits
+from discord.http import HTTPClient
+
+class NoRetryHTTPClient(HTTPClient):
+    async def request(self, route, **kwargs):
+        try:
+            return await super().request(route, **kwargs)
+        except discord.HTTPException as e:
+            if e.code == 429:  # Rate limited
+                logger.warning(f"⚠️ Rate limit hit - skipping")
+                raise  # Re-raise so we catch it in our code
+            raise
+
 class RailwayBot(discord.Client):
     def __init__(self):
-        # Disable rate limit retries in the client too
-        super().__init__(max_ratelimit_retries=0)
+        # Use custom HTTP client
+        super().__init__()
+        self.http = NoRetryHTTPClient()
         self.token = os.environ.get('DISCORD_TOKEN')
         self.images_path = "/app/images"
         self.available_images = self.scan_images()
         self.load_config()
         self.last_sent = {}
         self.running = True
+        self.rate_limited_channels = {}  # Track rate limited channels
         
     def scan_images(self):
         """Scan the images folder and return list of available images"""
@@ -57,48 +68,21 @@ class RailwayBot(discord.Client):
             logger.error(f"❌ Failed to parse CHANNELS JSON: {e}")
             self.channels = []
     
-    async def send_image_to_channel(self, channel_id, specific_image=None):
-        """Send an image to a specific channel"""
+    async def send_message_without_retry(self, channel, content=None, file=None):
+        """Send a message but catch rate limits immediately"""
         try:
-            channel = self.get_channel(int(channel_id))
-            if not channel:
-                logger.error(f"❌ Channel not found: {channel_id[:8]}...")
-                return False
-            
-            if not self.available_images:
-                logger.error("❌ No images found in volume!")
-                return False
-            
-            image_path = None
-            if specific_image:
-                for img in self.available_images:
-                    if specific_image in img or img.endswith(specific_image):
-                        image_path = img
-                        break
-                
-                if not image_path:
-                    logger.error(f"❌ Image '{specific_image}' not found")
-                    return False
+            if file:
+                await channel.send(file=file)
             else:
-                image_path = random.choice(self.available_images)
-            
-            filename = os.path.basename(image_path)
-            with open(image_path, 'rb') as f:
-                await channel.send(file=discord.File(f, filename=filename))
-            
-            logger.info(f"✅ Image sent to {channel_id[:8]}... ({filename})")
+                await channel.send(content)
             return True
-            
         except discord.HTTPException as e:
             if e.code == 429:  # Rate limited
-                logger.warning(f"⚠️ Rate limited on image for {channel_id[:8]}... - skipping")
+                logger.warning(f"⚠️ Rate limit hit for {channel.id} - skipping")
                 return False
             else:
-                logger.error(f"❌ Discord error sending image: {e.code}")
+                logger.error(f"❌ Discord error {e.code}: {e}")
                 return False
-        except Exception as e:
-            logger.error(f"❌ Error sending image: {e}")
-            return False
     
     async def on_ready(self):
         logger.info(f"✅ Bot logged in as {self.user}")
@@ -110,81 +94,70 @@ class RailwayBot(discord.Client):
         self.loop.create_task(self.send_loop())
     
     async def send_loop(self):
-        """FINAL FIX - With discord.py retries disabled"""
+        """Simple loop that never waits on rate limits"""
         while self.running:
             try:
                 now = datetime.now()
-                channels_to_send = []
                 
-                # Check which channels need sending
-                for channel_config in self.channels:
+                # Shuffle channels for randomness
+                channels_copy = self.channels.copy()
+                random.shuffle(channels_copy)
+                
+                for channel_config in channels_copy:
                     channel_id = channel_config["channel_id"]
                     
-                    should_send = True
+                    # Check if we already sent to this channel recently
                     if channel_id in self.last_sent:
                         last = self.last_sent[channel_id]
                         hours_since = (now - last).total_seconds() / 3600
                         if hours_since < self.interval_hours:
-                            should_send = False
+                            continue
                     
-                    if should_send:
-                        channels_to_send.append(channel_config)
-                
-                if channels_to_send:
-                    logger.info(f"📨 Sending to {len(channels_to_send)} channels")
-                    random.shuffle(channels_to_send)
+                    # Random delay between channels
+                    delay = random.randint(self.min_delay, self.max_delay)
+                    logger.info(f"⏱️ Waiting {delay}s before next channel...")
+                    await asyncio.sleep(delay)
                     
-                    for channel_config in channels_to_send:
-                        channel_id = channel_config["channel_id"]
-                        
-                        # Normal delay between channels
-                        delay = random.randint(self.min_delay, self.max_delay)
-                        logger.info(f"⏱️ Waiting {delay}s before next channel...")
-                        await asyncio.sleep(delay)
-                        
-                        try:
-                            channel = self.get_channel(int(channel_id))
-                            if not channel:
-                                logger.error(f"❌ Channel not found: {channel_id[:8]}...")
-                                self.last_sent[channel_id] = now
-                                continue
-                            
-                            msg_type = channel_config.get("type", "text")
-                            
-                            try:
-                                if msg_type == "text":
-                                    await channel.send(channel_config["message"])
-                                    logger.info(f"✅ Text sent to {channel_id[:8]}...")
-                                    
-                                elif msg_type == "image":
-                                    image_name = channel_config.get("image", None)
-                                    await self.send_image_to_channel(channel_id, image_name)
-                                    
-                                elif msg_type == "mixed":
-                                    await channel.send(channel_config["message"])
-                                    await self.send_image_to_channel(channel_id)
-                                
-                                self.last_sent[channel_id] = now
-                                
-                            except discord.HTTPException as e:
-                                if e.code == 429:  # Rate limited
-                                    logger.warning(f"⚠️ Rate limited on {channel_id[:8]}... - SKIPPED (no wait)")
-                                else:
-                                    logger.error(f"❌ Discord error {e.code} in {channel_id[:8]}... - skipping")
-                                # Mark as sent to avoid retry loop
-                                self.last_sent[channel_id] = now
-                                
-                            except discord.Forbidden:
-                                logger.error(f"❌ Missing permissions in {channel_id[:8]}... - skipping")
-                                self.last_sent[channel_id] = now
-                                
-                            except Exception as e:
-                                logger.error(f"❌ Unexpected error in {channel_id[:8]}...: {e} - skipping")
-                                self.last_sent[channel_id] = now
-                            
-                        except Exception as e:
-                            logger.error(f"❌ Channel error: {e}")
+                    try:
+                        channel = self.get_channel(int(channel_id))
+                        if not channel:
+                            logger.error(f"❌ Channel not found: {channel_id[:8]}...")
                             self.last_sent[channel_id] = now
+                            continue
+                        
+                        msg_type = channel_config.get("type", "text")
+                        
+                        success = False
+                        if msg_type == "text":
+                            success = await self.send_message_without_retry(
+                                channel, 
+                                content=channel_config["message"]
+                            )
+                            
+                        elif msg_type == "image":
+                            image_name = channel_config.get("image", None)
+                            # Find image
+                            if image_name and self.available_images:
+                                for img_path in self.available_images:
+                                    if image_name in img_path:
+                                        with open(img_path, 'rb') as f:
+                                            file = discord.File(f, filename=image_name)
+                                            success = await self.send_message_without_retry(
+                                                channel, 
+                                                file=file
+                                            )
+                                        break
+                        
+                        if success:
+                            logger.info(f"✅ Sent to {channel_id[:8]}...")
+                            self.last_sent[channel_id] = now
+                        else:
+                            logger.warning(f"⚠️ Failed to send to {channel_id[:8]}... - skipping")
+                            self.last_sent[channel_id] = now
+                            
+                    except Exception as e:
+                        logger.error(f"❌ Error: {e}")
+                        self.last_sent[channel_id] = now
                 
                 # Next run
                 next_run = now + timedelta(hours=self.interval_hours)
@@ -193,8 +166,7 @@ class RailwayBot(discord.Client):
                 await asyncio.sleep(self.interval_hours * 3600)
                 
             except Exception as e:
-                logger.error(f"❌ Error in send loop: {e}")
-                logger.error(traceback.format_exc())
+                logger.error(f"❌ Loop error: {e}")
                 await asyncio.sleep(60)
     
     def stop(self):
@@ -206,7 +178,6 @@ class RailwayBot(discord.Client):
             self.run(self.token)
         except Exception as e:
             logger.error(f"❌ Bot error: {e}")
-            logger.error(traceback.format_exc())
 
 def main():
     bot = RailwayBot()
