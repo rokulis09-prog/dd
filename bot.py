@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import asyncio
 from pathlib import Path
 import logging
+import traceback
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -15,7 +16,7 @@ class RailwayBot(discord.Client):
     def __init__(self):
         super().__init__()
         self.token = os.environ.get('DISCORD_TOKEN')
-        self.images_path = "/app/images"  # Your volume mount path
+        self.images_path = "/app/images"
         self.available_images = self.scan_images()
         self.load_config()
         self.last_sent = {}
@@ -28,12 +29,10 @@ class RailwayBot(discord.Client):
             logger.warning(f"⚠️ Image directory {self.images_path} not found!")
             return []
         
-        # Get all image files
         extensions = ['*.jpg', '*.jpeg', '*.png', '*.gif', '*.webp']
         images = []
         for ext in extensions:
             images.extend(image_dir.glob(ext))
-            # Also check subfolders
             images.extend(image_dir.rglob(ext))
         
         logger.info(f"✅ Found {len(images)} images in volume")
@@ -45,7 +44,6 @@ class RailwayBot(discord.Client):
         self.min_delay = int(os.environ.get('MIN_DELAY', '60'))
         self.max_delay = int(os.environ.get('MAX_DELAY', '300'))
         
-        # Get channels from JSON
         channels_json = os.environ.get('CHANNELS', '[]')
         try:
             self.channels = json.loads(channels_json)
@@ -66,10 +64,8 @@ class RailwayBot(discord.Client):
                 logger.error("❌ No images found in volume!")
                 return False
             
-            # Choose image
             image_path = None
             if specific_image:
-                # Look for specific image
                 for img in self.available_images:
                     if specific_image in img or img.endswith(specific_image):
                         image_path = img
@@ -79,10 +75,8 @@ class RailwayBot(discord.Client):
                     logger.error(f"❌ Image '{specific_image}' not found")
                     return False
             else:
-                # Pick random image
                 image_path = random.choice(self.available_images)
             
-            # Send the image
             filename = os.path.basename(image_path)
             with open(image_path, 'rb') as f:
                 await channel.send(file=discord.File(f, filename=filename))
@@ -101,11 +95,10 @@ class RailwayBot(discord.Client):
         logger.info(f"⏰ Interval: {self.interval_hours} hours")
         logger.info(f"⏱️ Delays: {self.min_delay}-{self.max_delay} seconds")
         
-        # Start sending loop
         self.loop.create_task(self.send_loop())
     
     async def send_loop(self):
-        """Main sending loop with image support"""
+        """Main sending loop with image support - FIXED VERSION"""
         while self.running:
             try:
                 now = datetime.now()
@@ -132,7 +125,6 @@ class RailwayBot(discord.Client):
                     for channel_config in channels_to_send:
                         channel_id = channel_config["channel_id"]
                         
-                        # Random delay
                         delay = random.randint(self.min_delay, self.max_delay)
                         logger.info(f"⏱️ Waiting {delay}s before next channel...")
                         await asyncio.sleep(delay)
@@ -143,29 +135,36 @@ class RailwayBot(discord.Client):
                                 logger.error(f"❌ Channel not found: {channel_id[:8]}...")
                                 continue
                             
-                            # Determine message type
                             msg_type = channel_config.get("type", "text")
                             
                             if msg_type == "text":
-                                # Just text
                                 await channel.send(channel_config["message"])
                                 logger.info(f"✅ Text sent to {channel_id[:8]}...")
                                 
                             elif msg_type == "image":
-                                # Just image
                                 image_name = channel_config.get("image", None)
                                 await self.send_image_to_channel(channel_id, image_name)
                                 
                             elif msg_type == "mixed":
-                                # Text + image
                                 await channel.send(channel_config["message"])
                                 await self.send_image_to_channel(channel_id)
                             
-                            # Update last sent time
+                            self.last_sent[channel_id] = now
+                            
+                        except discord.Forbidden as e:
+                            logger.error(f"❌ Missing permissions in {channel_id[:8]}...: {e}")
+                            # Still mark as sent to avoid constant retries
+                            self.last_sent[channel_id] = now
+                            
+                        except discord.HTTPException as e:
+                            logger.error(f"❌ Discord error in {channel_id[:8]}...: {e.code} - {e.text}")
+                            # Mark as sent to avoid getting stuck
                             self.last_sent[channel_id] = now
                             
                         except Exception as e:
-                            logger.error(f"❌ Error sending to {channel_id[:8]}...: {e}")
+                            logger.error(f"❌ Unexpected error in {channel_id[:8]}...: {e}")
+                            # Still mark as sent to avoid infinite loop
+                            self.last_sent[channel_id] = now
                 
                 # Next run
                 next_run = now + timedelta(hours=self.interval_hours)
@@ -175,7 +174,8 @@ class RailwayBot(discord.Client):
                 
             except Exception as e:
                 logger.error(f"❌ Error in send loop: {e}")
-                await asyncio.sleep(60)
+                logger.error(traceback.format_exc())
+                await asyncio.sleep(60)  # Wait a minute before restarting loop
     
     def stop(self):
         self.running = False
@@ -186,6 +186,7 @@ class RailwayBot(discord.Client):
             self.run(self.token)
         except Exception as e:
             logger.error(f"❌ Bot error: {e}")
+            logger.error(traceback.format_exc())
 
 def main():
     bot = RailwayBot()
