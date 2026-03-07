@@ -10,7 +10,7 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class DirectAPIBot:
+class ImageBot:
     def __init__(self):
         self.token = os.environ.get('DISCORD_TOKEN')
         self.interval_hours = float(os.environ.get('INTERVAL_HOURS', '2'))
@@ -22,73 +22,52 @@ class DirectAPIBot:
         self.channels = json.loads(channels_json)
         logger.info(f"✅ Loaded {len(self.channels)} channels")
         
-        # Image handling
+        # Image path
         self.images_path = "/app/images"
-        self.available_images = self.scan_images()
+        self.check_images()
         
         self.last_sent = {}
-        self.base_url = "https://discord.com/api/v9"
+        self.headers = {'Authorization': self.token}
     
-    def scan_images(self):
-        """Scan the images folder and return list of available images"""
-        image_dir = Path(self.images_path)
+    def check_images(self):
+        """Patikrinam ar yra nuotraukų"""
+        path = Path(self.images_path)
+        if not path.exists():
+            logger.error(f"❌ Nerastas folderis: {self.images_path}")
+            return
         
-        logger.info(f"🔍 Looking for images in: {image_dir.absolute()}")
-        
-        if not image_dir.exists():
-            logger.warning(f"⚠️ Image directory {self.images_path} not found!")
-            return []
-        
-        # Get all image files
-        extensions = ['*.jpg', '*.jpeg', '*.png', '*.gif', '*.webp']
-        images = []
-        for ext in extensions:
-            images.extend(image_dir.glob(ext))
-        
-        logger.info(f"✅ Found {len(images)} images in volume")
-        if images:
-            logger.info(f"📸 Images: {[img.name for img in images]}")
-        
-        return list(images)
+        files = list(path.glob("*"))
+        logger.info(f"📂 Folderio turinys: {[f.name for f in files]}")
     
     def send_image(self, channel_id, image_name):
-        """TIKSRAI siunčia nuotrauką"""
-        url = f"{self.base_url}/channels/{channel_id}/messages"
+        """TIKRAI SIUNČIA NUOTRAUKĄ"""
+        url = f"https://discord.com/api/v9/channels/{channel_id}/messages"
+        image_path = Path(self.images_path) / image_name
         
-        # Find image
-        image_path = None
-        for img in self.available_images:
-            if image_name == img.name or image_name in img.name:
-                image_path = img
-                break
-        
-        if not image_path:
-            logger.error(f"❌ Nerastas failas: {image_name}")
+        if not image_path.exists():
+            logger.error(f"❌ Nerastas failas: {image_path}")
             return False
         
         try:
             with open(image_path, 'rb') as f:
-                files = {'file': (image_path.name, f, 'image/webp')}
-                headers = {'Authorization': self.token}
-                
-                response = requests.post(url, headers=headers, files=files)
+                files = {'file': (image_name, f, 'image/webp')}
+                response = requests.post(url, headers=self.headers, files=files)
                 
                 if response.status_code == 200:
-                    logger.info(f"🖼️✅ PAVEIKSLĖLIS IŠSIŲSTAS į {channel_id[:8]}... ({image_path.name})")
+                    logger.info(f"🖼️✅ NUOTRAUKA IŠSIŲSTA! {image_name} -> {channel_id[:8]}...")
                     return True
                 elif response.status_code == 429:
                     logger.warning(f"⚠️ Rate limit {channel_id[:8]}... skip")
                     return False
                 else:
-                    logger.error(f"❌ Klaida {response.status_code}")
+                    logger.error(f"❌ Klaida {response.status_code}: {response.text}")
                     return False
         except Exception as e:
-            logger.error(f"❌ Klaida siunčiant: {e}")
+            logger.error(f"❌ Exception: {e}")
             return False
     
-    def run_forever(self):
-        """Pagrindinis ciklas"""
-        logger.info("🚀 Bot paleistas - SIIUNČIA NUOTRAUKAS")
+    def run(self):
+        logger.info("🚀 BOT STARTED - TIKRAS NUOTRAUKŲ SIUNTIMAS")
         
         while True:
             now = datetime.now()
@@ -108,17 +87,15 @@ class DirectAPIBot:
                 logger.info(f"⏱️ Laukiam {delay}s...")
                 time.sleep(delay)
                 
-                # Send based on type
-                msg_type = channel.get("type", "text")
-                
-                if msg_type == "image":
+                # Send image
+                if channel.get("type") == "image":
                     image_name = channel.get("image", "")
                     if image_name:
                         self.send_image(channel_id, image_name)
                     else:
-                        logger.error(f"❌ Nenurodytas paveikslėlis kanalui {channel_id[:8]}...")
+                        logger.error(f"❌ Nenurodytas failo pavadinimas")
                 else:
-                    logger.info(f"💬 Tekstinis kanalas {channel_id[:8]}... - praleidžiam")
+                    logger.info(f"💬 Text channel - skip")
                 
                 self.last_sent[channel_id] = now
             
@@ -129,5 +106,5 @@ class DirectAPIBot:
             time.sleep(self.interval_hours * 3600)
 
 if __name__ == "__main__":
-    bot = DirectAPIBot()
-    bot.run_forever()
+    bot = ImageBot()
+    bot.run()
