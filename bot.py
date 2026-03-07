@@ -1,88 +1,100 @@
-const { Client } = require('discord.js-selfbot-v13');
-const fs = require('fs');
-const path = require('path');
+import requests
+import time
+import random
+import json
+import os
+import logging
+from datetime import datetime, timedelta
 
-// Load config
-const configPath = path.join(__dirname, 'config.json');
-const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-console.log(`🚀 Loaded ${config.accounts.length} accounts`);
-
-// Create clients for each account
-const clients = [];
-
-config.accounts.forEach((account, index) => {
-    const client = new Client();
-    client.accountIndex = index;
-    client.accountData = account;
-    
-    client.on('ready', async () => {
-        console.log(`✅ [Account ${index + 1}] Logged in as ${client.user.tag}`);
+class MessageBot:
+    def __init__(self):
+        self.token = os.environ.get('DISCORD_TOKEN')
+        if not self.token:
+            logger.error("❌ NĖRA TOKEN! Pridėk DISCORD_TOKEN į variables")
+            return
+            
+        self.interval_hours = float(os.environ.get('INTERVAL_HOURS', '2'))
+        self.min_delay = int(os.environ.get('MIN_DELAY', '60'))
+        self.max_delay = int(os.environ.get('MAX_DELAY', '180'))
         
-        // Start bump loops for each bot
-        account.bots.forEach(botConfig => {
-            botConfig.commands.forEach(cmd => {
-                startBumpLoop(client, botConfig, cmd);
-            });
-        });
-    });
+        # Load channels
+        channels_json = os.environ.get('CHANNELS', '[]')
+        try:
+            self.channels = json.loads(channels_json)
+            logger.info(f"✅ Užkrauta {len(self.channels)} kanalų")
+        except:
+            logger.error("❌ KLAIDA skaitant CHANNELS")
+            self.channels = []
+        
+        self.last_sent = {}
+        self.headers = {'Authorization': self.token}
+        self.base_url = "https://discord.com/api/v9"
     
-    client.on('error', (error) => {
-        console.log(`⚠️ [Account ${index + 1}] Error:`, error.message);
-    });
-    
-    clients.push(client);
-});
-
-function startBumpLoop(client, botConfig, cmd) {
-    const channelId = cmd.channelId;
-    const commandName = cmd.command;
-    const botId = botConfig.botId;
-    const minInterval = (cmd.intervalMinutes - (cmd.intervalMinutes * (cmd.randomVariationPercent / 100))) * 60000;
-    const maxInterval = (cmd.intervalMinutes + (cmd.intervalMinutes * (cmd.randomVariationPercent / 100))) * 60000;
-    
-    async function bump() {
-        try {
-            const channel = await client.channels.fetch(channelId).catch(() => null);
-            if (!channel) {
-                console.log(`❌ [${client.user?.tag}] Channel ${channelId} not found - skipping`);
-                return;
-            }
+    def send_message(self, channel_id, message):
+        """Siunčia žinutę - jei klaida, skipina"""
+        url = f"{self.base_url}/channels/{channel_id}/messages"
+        data = {'content': message}
+        
+        try:
+            response = requests.post(url, headers=self.headers, json=data)
             
-            await channel.sendSlash(botId, commandName);
-            console.log(`✅ [${client.user?.tag}] Bumped in ${channelId}`);
-        } catch (error) {
-            // Skip on error - don't crash
-            console.log(`⚠️ [${client.user?.tag}] Failed to bump ${channelId}: ${error.message} - skipping`);
-        }
-    }
+            if response.status_code == 200:
+                logger.info(f"✅ Išsiųsta į {channel_id[:8]}...")
+                return True
+            elif response.status_code == 403:
+                logger.warning(f"⚠️ Negaliu rašyti į {channel_id[:8]}... (403) - skip")
+                return False
+            elif response.status_code == 429:
+                logger.warning(f"⚠️ Rate limit {channel_id[:8]}... - skip")
+                return False
+            else:
+                logger.warning(f"⚠️ Klaida {response.status_code} į {channel_id[:8]}... - skip")
+                return False
+        except Exception as e:
+            logger.warning(f"⚠️ Exception siunčiant į {channel_id[:8]}...: {e} - skip")
+            return False
     
-    async function loop() {
-        while (true) {
-            await bump();
+    def run(self):
+        logger.info("🚀 BOT STARTED - TIK ŽINUTĖS, JOKIŲ NUOTRAUKŲ")
+        logger.info(f"📊 Monitoring {len(self.channels)} kanalų")
+        
+        while True:
+            now = datetime.now()
             
-            // Random interval
-            const interval = Math.floor(Math.random() * (maxInterval - minInterval + 1)) + minInterval;
-            const nextBump = new Date(Date.now() + interval);
-            console.log(`⏱️ [${client.user?.tag}] Next bump for ${channelId} at ${nextBump.toLocaleTimeString()}`);
+            # Randomize channel order
+            random.shuffle(self.channels)
             
-            await new Promise(resolve => setTimeout(resolve, interval));
-        }
-    }
-    
-    loop();
-}
+            for channel in self.channels:
+                channel_id = channel['channel_id']
+                message = channel['message']
+                
+                # Check if we already sent recently
+                if channel_id in self.last_sent:
+                    last = self.last_sent[channel_id]
+                    hours_since = (now - last).total_seconds() / 3600
+                    if hours_since < self.interval_hours:
+                        continue
+                
+                # Random delay between channels
+                delay = random.randint(self.min_delay, self.max_delay)
+                logger.info(f"⏱️ Laukiam {delay}s prieš {channel_id[:8]}...")
+                time.sleep(delay)
+                
+                # Send message (skip if fails)
+                success = self.send_message(channel_id, message)
+                
+                # Mark as sent regardless (so we don't retry same channel in this cycle)
+                self.last_sent[channel_id] = now
+            
+            # Next batch
+            next_run = now + timedelta(hours=self.interval_hours)
+            logger.info(f"🕒 Kitas ciklas: {next_run.strftime('%H:%M:%S')}")
+            logger.info(f"💤 Miegam {self.interval_hours} val...")
+            time.sleep(self.interval_hours * 3600)
 
-// Login all accounts
-config.accounts.forEach((account, index) => {
-    clients[index].login(account.token).catch(error => {
-        console.log(`❌ [Account ${index + 1}] Login failed:`, error.message);
-    });
-});
-
-// Graceful shutdown
-process.on('SIGINT', () => {
-    console.log('\n👋 Shutting down...');
-    clients.forEach(client => client.destroy());
-    process.exit();
-});
+if __name__ == "__main__":
+    bot = MessageBot()
+    bot.run()
