@@ -1,96 +1,88 @@
-import requests
-import time
-import random
-import json
-import os
-import logging
-from datetime import datetime, timedelta
+const { Client } = require('discord.js-selfbot-v13');
+const fs = require('fs');
+const path = require('path');
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+// Load config
+const configPath = path.join(__dirname, 'config.json');
+const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 
-class DirectAPIBot:
-    def __init__(self):
-        self.token = os.environ.get('DISCORD_TOKEN')
-        self.interval_hours = float(os.environ.get('INTERVAL_HOURS', '2'))
-        self.min_delay = int(os.environ.get('MIN_DELAY', '60'))
-        self.max_delay = int(os.environ.get('MAX_DELAY', '300'))
+console.log(`🚀 Loaded ${config.accounts.length} accounts`);
+
+// Create clients for each account
+const clients = [];
+
+config.accounts.forEach((account, index) => {
+    const client = new Client();
+    client.accountIndex = index;
+    client.accountData = account;
+    
+    client.on('ready', async () => {
+        console.log(`✅ [Account ${index + 1}] Logged in as ${client.user.tag}`);
         
-        # Load channels
-        channels_json = os.environ.get('CHANNELS', '[]')
-        self.channels = json.loads(channels_json)
-        logger.info(f"✅ Loaded {len(self.channels)} channels")
-        
-        self.last_sent = {}
-        self.headers = {
-            'Authorization': self.token,
-            'Content-Type': 'application/json'
+        // Start bump loops for each bot
+        account.bots.forEach(botConfig => {
+            botConfig.commands.forEach(cmd => {
+                startBumpLoop(client, botConfig, cmd);
+            });
+        });
+    });
+    
+    client.on('error', (error) => {
+        console.log(`⚠️ [Account ${index + 1}] Error:`, error.message);
+    });
+    
+    clients.push(client);
+});
+
+function startBumpLoop(client, botConfig, cmd) {
+    const channelId = cmd.channelId;
+    const commandName = cmd.command;
+    const botId = botConfig.botId;
+    const minInterval = (cmd.intervalMinutes - (cmd.intervalMinutes * (cmd.randomVariationPercent / 100))) * 60000;
+    const maxInterval = (cmd.intervalMinutes + (cmd.intervalMinutes * (cmd.randomVariationPercent / 100))) * 60000;
+    
+    async function bump() {
+        try {
+            const channel = await client.channels.fetch(channelId).catch(() => null);
+            if (!channel) {
+                console.log(`❌ [${client.user?.tag}] Channel ${channelId} not found - skipping`);
+                return;
+            }
+            
+            await channel.sendSlash(botId, commandName);
+            console.log(`✅ [${client.user?.tag}] Bumped in ${channelId}`);
+        } catch (error) {
+            // Skip on error - don't crash
+            console.log(`⚠️ [${client.user?.tag}] Failed to bump ${channelId}: ${error.message} - skipping`);
         }
-        self.base_url = "https://discord.com/api/v9"
+    }
     
-    def send_message(self, channel_id, content):
-        """Send message - NO AUTO RETRY, returns immediately"""
-        url = f"{self.base_url}/channels/{channel_id}/messages"
-        data = {'content': content}
-        
-        response = requests.post(url, headers=self.headers, json=data)
-        
-        if response.status_code == 200:
-            logger.info(f"✅ Sent to {channel_id[:8]}...")
-            return True
-        elif response.status_code == 429:
-            logger.warning(f"⚠️ Rate limited on {channel_id[:8]}... SKIPPING")
-            return False  # We return immediately, don't wait!
-        else:
-            logger.error(f"❌ Error {response.status_code} on {channel_id[:8]}...")
-            return False
+    async function loop() {
+        while (true) {
+            await bump();
+            
+            // Random interval
+            const interval = Math.floor(Math.random() * (maxInterval - minInterval + 1)) + minInterval;
+            const nextBump = new Date(Date.now() + interval);
+            console.log(`⏱️ [${client.user?.tag}] Next bump for ${channelId} at ${nextBump.toLocaleTimeString()}`);
+            
+            await new Promise(resolve => setTimeout(resolve, interval));
+        }
+    }
     
-    def run_forever(self):
-        """Main loop - runs forever"""
-        logger.info("🚀 Bot started - NO AUTO RETRIES")
-        
-        while True:
-            now = datetime.now()
-            
-            # Randomize channel order
-            channels_copy = self.channels.copy()
-            random.shuffle(channels_copy)
-            
-            for channel in channels_copy:
-                channel_id = channel['channel_id']
-                
-                # Check if we should send
-                if channel_id in self.last_sent:
-                    last = self.last_sent[channel_id]
-                    hours_since = (now - last).total_seconds() / 3600
-                    if hours_since < self.interval_hours:
-                        continue
-                
-                # Delay between channels
-                delay = random.randint(self.min_delay, self.max_delay)
-                logger.info(f"⏱️ Waiting {delay}s...")
-                time.sleep(delay)
-                
-                # Send message based on type
-                msg_type = channel.get("type", "text")
-                
-                if msg_type == "text":
-                    success = self.send_message(channel_id, channel['message'])
-                elif msg_type == "image":
-                    logger.info(f"🖼️ Image channel {channel_id[:8]}... - would send image here")
-                    success = True  # Placeholder for now
-                else:
-                    success = self.send_message(channel_id, channel['message'])
-                
-                # Mark as sent regardless of outcome (so we don't retry same channel)
-                self.last_sent[channel_id] = now
-            
-            # Next batch
-            next_run = now + timedelta(hours=self.interval_hours)
-            logger.info(f"🕒 Next batch at: {next_run.strftime('%H:%M:%S')}")
-            logger.info(f"💤 Sleeping {self.interval_hours} hours...")
-            time.sleep(self.interval_hours * 3600)
+    loop();
+}
 
-if __name__ == "__main__":
-    bot = DirectAPIBot()
-    bot.run_forever()
+// Login all accounts
+config.accounts.forEach((account, index) => {
+    clients[index].login(account.token).catch(error => {
+        console.log(`❌ [Account ${index + 1}] Login failed:`, error.message);
+    });
+});
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+    console.log('\n👋 Shutting down...');
+    clients.forEach(client => client.destroy());
+    process.exit();
+});
